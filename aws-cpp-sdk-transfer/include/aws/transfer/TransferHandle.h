@@ -77,6 +77,9 @@ namespace Aws
                 bool IsLastPart() { return m_lastPart; }
                 void SetLastPart() { m_lastPart = true; }
 
+                void SetDirectOutput(){m_direct_buffer_write=true;}
+                bool IsDirectOutput(){return m_direct_buffer_write;}
+
             private:
 
                 int m_partId;
@@ -90,6 +93,7 @@ namespace Aws
                 std::atomic<Aws::IOStream *> m_downloadPartStream;
                 std::atomic<unsigned char*> m_downloadBuffer;
                 bool m_lastPart;
+                bool m_direct_buffer_write;
         };
 
         using PartPointer = std::shared_ptr< PartState >;
@@ -364,6 +368,20 @@ namespace Aws
              */
             Aws::String GetId() const;
 
+            /* Sets a direct IO buffer for the handle. Parts write directly to this buffer avoiding memcopy operations.
+             * buffer size should be sufficently large to fit the download request.
+             * Buffer is owned by the caller and needs to outlive the handle.
+             */
+            void SetDirectOutputBuffer(unsigned char* buff, size_t bufferLength);
+            size_t GetDirectOutputBufferLength(){return m_directOutputBufferLength;}
+            unsigned char* GetDirectOutputChunk(size_t range_begin,size_t range_end);
+            bool IsDirectOutput(){
+                return m_directOutput;
+            }
+            void SetDirectOutputChunkSize(size_t chunkSize){m_directOutputChunkSize=chunkSize;}
+            size_t GetDirectDownloadChunkSize(){
+                return m_directOutputChunkSize;
+            }
         private:
 
             void CleanupDownloadStream();
@@ -393,7 +411,10 @@ namespace Aws
 
             CreateDownloadStreamCallback m_createDownloadStreamFn;
             Aws::IOStream* m_downloadStream;
-
+            unsigned char* m_directOutputBuffer;
+            size_t m_directOutputBufferLength;
+            size_t m_directOutputChunkSize;
+            bool m_directOutput;
             mutable std::mutex m_downloadStreamLock;
             mutable std::mutex m_partsLock;
             mutable std::mutex m_statusLock;

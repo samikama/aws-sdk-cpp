@@ -187,6 +187,21 @@ namespace Aws
                                                          const std::shared_ptr<const Aws::Client::AsyncCallerContext>& context = nullptr);
 
             /**
+             * Downloads the contents between `fileoffset` and `downloadBytes` of bucketName/keyName in S3 and writes it to buffer with size `bufferSize` given in `output_buffer`
+             * if `downloadBytes` is greater than the file size, it will be truncated to file size. `outputBuffer` must point to a memory buffer that is larger 
+             * than or equal to `downloadBytes`. `downloadChunkSize` will control how much data each thread will fetch before continuing to next download chunk. This method will reduce the extra memcopy and locking operations. 
+             */
+            std::shared_ptr<TransferHandle> DownloadFile(const Aws::String& bucketName, 
+                                                         const Aws::String& keyName, 
+                                                         uint64_t fileOffset,
+                                                         uint64_t downloadBytes,
+                                                         unsigned char* downloadBuffer,
+                                                         uint64_t bufferSize,
+                                                         uint64_t downloadChunkSize = 0,
+                                                         const DownloadConfiguration& downloadConfig = DownloadConfiguration(),
+                                                         const std::shared_ptr<const Aws::Client::AsyncCallerContext>& context = nullptr);
+
+            /**
              * Retry an download that failed from a previous DownloadFile operation. If a multi-part download was used, only the failed parts will be re-fetched.
              */
             std::shared_ptr<TransferHandle> RetryDownload(const std::shared_ptr<TransferHandle>& retryHandle);

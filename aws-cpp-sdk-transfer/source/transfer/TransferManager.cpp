@@ -102,7 +102,7 @@ namespace Aws
             auto handle = Aws::MakeShared<TransferHandle>(CLASS_TAG, bucketName, keyName, writeToStreamfn, writeToFile);
             handle->ApplyDownloadConfiguration(downloadConfig);
             handle->SetContext(context);
-
+            handle->SetDirectOutputChunkSize(m_transferConfig.bufferSize);
             auto self = shared_from_this();
             m_transferConfig.transferExecutor->Submit([self, handle] { self->DoDownload(handle); });
             return handle;
@@ -120,7 +120,28 @@ namespace Aws
             auto handle = Aws::MakeShared<TransferHandle>(CLASS_TAG, bucketName, keyName, fileOffset, downloadBytes, writeToStreamfn, writeToFile);
             handle->ApplyDownloadConfiguration(downloadConfig);
             handle->SetContext(context);
+            handle->SetDirectOutputChunkSize(m_transferConfig.bufferSize);
+            auto self = shared_from_this();
+            m_transferConfig.transferExecutor->Submit([self, handle] { self->DoDownload(handle); });
+            return handle;
+        }
 
+        std::shared_ptr<TransferHandle> TransferManager::DownloadFile(const Aws::String& bucketName,
+                                                                      const Aws::String& keyName,
+                                                                      uint64_t fileOffset,
+                                                                      uint64_t downloadBytes,
+                                                                      unsigned char* downloadBuffer,
+                                                                      uint64_t bufferSize,
+                                                                      uint64_t downloadChunkSize,
+                                                                      const DownloadConfiguration& downloadConfig,
+                                                                      const std::shared_ptr<const Aws::Client::AsyncCallerContext>& context)
+        {
+            auto handle = Aws::MakeShared<TransferHandle>(CLASS_TAG, bucketName, keyName, fileOffset, downloadBytes, [](){return nullptr;},"");
+            handle->ApplyDownloadConfiguration(downloadConfig);
+            handle->SetContext(context);
+            assert(downloadBuffer!=nullptr);
+            handle->SetDirectOutputBuffer(downloadBuffer, bufferSize);
+            handle->SetDirectOutputChunkSize(downloadChunkSize ? downloadChunkSize : m_transferConfig.bufferSize);
             auto self = shared_from_this();
             m_transferConfig.transferExecutor->Submit([self, handle] { self->DoDownload(handle); });
             return handle;
@@ -636,7 +657,11 @@ namespace Aws
             {
                 DownloadConfiguration retryDownloadConfig;
                 retryDownloadConfig.versionId = retryHandle->GetVersionId();
-                return DownloadFile(retryHandle->GetBucketName(), retryHandle->GetKey(), retryHandle->GetCreateDownloadStreamFunction(), retryDownloadConfig, retryHandle->GetTargetFilePath());
+
+                auto new_handle=DownloadFile(retryHandle->GetBucketName(), retryHandle->GetKey(), retryHandle->GetCreateDownloadStreamFunction(), retryDownloadConfig, retryHandle->GetTargetFilePath());
+                new_handle->SetDirectOutputBuffer(retryHandle->GetDirectOutputChunk(0,1), retryHandle->GetDirectOutputBufferLength());
+                new_handle->SetDirectOutputChunkSize(retryHandle->GetDirectDownloadChunkSize());
+                return new_handle;
             }
 
             retryHandle->UpdateStatus(TransferStatus::NOT_STARTED);
@@ -677,9 +702,18 @@ namespace Aws
             {
                 request.SetVersionId(handle->GetVersionId());
             }
-
-            request.SetResponseStreamFactory(handle->GetCreateDownloadStreamFunction());
-
+            if(handle->IsDirectOutput()){
+                request.SetResponseStreamFactory([handle]
+                                {
+                    auto bufferStream = Aws::New<Aws::Utils::Stream::DefaultUnderlyingStream>(CLASS_TAG,
+                            Aws::MakeUnique<Aws::Utils::Stream::PreallocatedStreamBuf>(CLASS_TAG, 
+                                handle->GetDirectOutputChunk(0,handle->GetBytesTotalSize()-1),
+                                handle->GetBytesTotalSize()));
+                    return bufferStream;
+                });
+            }else{
+                request.SetResponseStreamFactory(handle->GetCreateDownloadStreamFunction());
+            }
             request.SetDataReceivedEventHandler([this, handle, partState](const Aws::Http::HttpRequest*, Aws::Http::HttpResponse*, long long progress)
             {
                 partState->OnDataTransferred(progress, handle);
@@ -718,7 +752,7 @@ namespace Aws
         bool TransferManager::InitializePartsForDownload(const std::shared_ptr<TransferHandle>& handle)
         {
             bool isRetry = handle->HasParts();
-            uint64_t bufferSize = m_transferConfig.bufferSize;
+            uint64_t bufferSize = handle->GetDirectDownloadChunkSize();
             if (!isRetry)
             {
                 Aws::S3::Model::HeadObjectRequest headObjectRequest;
@@ -777,6 +811,9 @@ namespace Aws
                     std::size_t partSize = (i + 1 < partCount ) ? bufferSize : (downloadSize - bufferSize * (partCount - 1));
                     bool lastPart = (i == partCount - 1) ? true : false;
                     auto partState = Aws::MakeShared<PartState>(CLASS_TAG, static_cast<int>(i + 1), 0, partSize, lastPart);
+                    if(handle->IsDirectOutput()){
+                        partState->SetDirectOutput();
+                    }
                     partState->SetRangeBegin(i * bufferSize);
                     handle->AddQueuedPart(partState);
                 }
@@ -802,7 +839,7 @@ namespace Aws
             TriggerTransferStatusUpdatedCallback(handle);
 
             bool isMultipart = handle->IsMultipart();
-            uint64_t bufferSize = m_transferConfig.bufferSize;
+            uint64_t bufferSize = handle->GetDirectDownloadChunkSize();
 
             if(!isMultipart)
             {
@@ -818,8 +855,13 @@ namespace Aws
                 const auto& partState = queuedPartIter->second;
                 uint64_t rangeStart = handle->GetBytesOffset() + ( partState->GetPartId() - 1 ) * bufferSize;
                 uint64_t rangeEnd = rangeStart + partState->GetSizeInBytes() - 1;
-                auto buffer = m_bufferManager.Acquire();
-                partState->SetDownloadBuffer(buffer);
+                unsigned char* buffer=nullptr;
+                if(handle->IsDirectOutput()){
+                    buffer=handle->GetDirectOutputChunk(rangeStart,rangeEnd);
+                }else{
+                    buffer = m_bufferManager.Acquire();
+                }
+                // partState->SetDownloadBuffer(buffer);
 
                 CreateDownloadStreamCallback responseStreamFunction = [partState, buffer, rangeEnd, rangeStart]()
                 {
@@ -876,7 +918,9 @@ namespace Aws
                 }
                 else if(buffer)
                 {
-                    m_bufferManager.Release(buffer);
+                    if(!handle->IsDirectOutput()){
+                        m_bufferManager.Release(buffer);
+                    }
                     break;
                 }
             }
@@ -921,10 +965,12 @@ namespace Aws
             else
             {
                 if(handle->ShouldContinue())
-                {
-                    Aws::IOStream* bufferStream = partState->GetDownloadPartStream();
-                    assert(bufferStream);
-                    handle->WritePartToDownloadStream(bufferStream, partState->GetRangeBegin());
+                {   
+                    if(!handle->IsDirectOutput()){
+                        Aws::IOStream* bufferStream = partState->GetDownloadPartStream();
+                        assert(bufferStream);
+                        handle->WritePartToDownloadStream(bufferStream, partState->GetRangeBegin());
+                    }
                     handle->ChangePartToCompleted(partState, outcome.GetResult().GetETag());
                 }
                 else
@@ -936,7 +982,9 @@ namespace Aws
             // buffer cleanup
             if(partState->GetDownloadBuffer())
             {
-                m_bufferManager.Release(partState->GetDownloadBuffer());
+                if(!partState->IsDirectOutput()){
+                    m_bufferManager.Release(partState->GetDownloadBuffer());
+                }
                 partState->SetDownloadBuffer(nullptr);
             }
 

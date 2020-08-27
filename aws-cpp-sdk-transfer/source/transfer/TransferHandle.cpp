@@ -22,7 +22,8 @@ namespace Aws
             m_rangeBegin(0),
             m_downloadPartStream(nullptr),
             m_downloadBuffer(nullptr),
-            m_lastPart(false)
+            m_lastPart(false),
+            m_direct_buffer_write(false)
         {}
 
         PartState::PartState(int partId, size_t bestProgressInBytes, size_t sizeInBytes, bool lastPart) :
@@ -34,7 +35,8 @@ namespace Aws
             m_rangeBegin(0),
             m_downloadPartStream(nullptr),
             m_downloadBuffer(nullptr),
-            m_lastPart(lastPart)
+            m_lastPart(lastPart),
+            m_direct_buffer_write(false)
         {}
 
 
@@ -76,7 +78,10 @@ namespace Aws
             m_cancel(false),
             m_handleId(Utils::UUID::RandomUUID()),
             m_createDownloadStreamFn(), 
-            m_downloadStream(nullptr)
+            m_downloadStream(nullptr),
+            m_directOutputBuffer(nullptr),
+            m_directOutputBufferLength(0),
+            m_directOutput(false)
         {}
 
         TransferHandle::TransferHandle(const Aws::String& bucketName, const Aws::String& keyName, const Aws::String& targetFilePath) :
@@ -94,7 +99,10 @@ namespace Aws
             m_cancel(false),
             m_handleId(Utils::UUID::RandomUUID()),
             m_createDownloadStreamFn(), 
-            m_downloadStream(nullptr)
+            m_downloadStream(nullptr),
+            m_directOutputBuffer(nullptr),
+            m_directOutputBufferLength(0),
+            m_directOutput(false)
         {}
 
         TransferHandle::TransferHandle(const Aws::String& bucketName, const Aws::String& keyName, CreateDownloadStreamCallback createDownloadStreamFn, const Aws::String& targetFilePath) :
@@ -112,7 +120,10 @@ namespace Aws
             m_cancel(false),
             m_handleId(Utils::UUID::RandomUUID()),
             m_createDownloadStreamFn(createDownloadStreamFn), 
-            m_downloadStream(nullptr)
+            m_downloadStream(nullptr),
+            m_directOutputBuffer(nullptr),
+            m_directOutputBufferLength(0),
+            m_directOutput(false)
         {}
 
         
@@ -133,7 +144,10 @@ namespace Aws
             m_cancel(false),
             m_handleId(Utils::UUID::RandomUUID()),
             m_createDownloadStreamFn(createDownloadStreamFn), 
-            m_downloadStream(nullptr)
+            m_downloadStream(nullptr),
+            m_directOutputBuffer(nullptr),
+            m_directOutputBufferLength(0),
+            m_directOutput(false)
         {}
 
         TransferHandle::~TransferHandle()
@@ -401,5 +415,23 @@ namespace Aws
         {
             return m_handleId;
         }
+
+        void TransferHandle::SetDirectOutputBuffer(unsigned char* buff,size_t bufferLength){
+            m_directOutputBuffer=buff;
+            m_directOutputBufferLength=bufferLength;
+            if(m_bytesTotalSize){
+                AWS_LOGSTREAM_FATAL(CLASS_TAG, "Direct output buffer size should be greater than or equal to download size "
+                << m_bytesTotalSize << ">" << bufferLength << " " << GetId());
+                assert(bufferLength>=m_bytesTotalSize);
+            }
+            m_directOutput=(buff!=nullptr)&&(bufferLength>0);
+        }
+        unsigned char* TransferHandle::GetDirectOutputChunk(size_t range_begin,size_t range_end){
+            if(range_end>=m_directOutputBufferLength){
+                AWS_LOGSTREAM_FATAL(CLASS_TAG,"Entered chunk size is not sufficient for the range requested "<<m_directOutputBuffer<<"<="<<range_end);
+            }
+            return m_directOutputBuffer+range_begin;
+        }
+
     }
 }
